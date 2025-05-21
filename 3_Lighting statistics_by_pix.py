@@ -5,8 +5,8 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import freeze_support
 
 # === 1. 路径参数 ===
-input_folder  = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\h09v06_Florida\Geotiff\2018\clipped"
-output_folder = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\h09v06_Florida\dbf\2018"
+input_folder  = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\h09v06_Florida\Geotiff\2017\clipped"
+output_folder = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\h09v06_Florida\dbf\2017xy"
 fishnet_shp   = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\h09v06_Florida\pixel_fishnet.shp"
 zone_field    = "index"            # 生成网格后会创建
 
@@ -17,6 +17,27 @@ def sanitize_name(raw_name):
     return f"d{date7}.dbf"
 
 # === 3. 仅首次运行时，创建像素鱼网格 ===
+def add_xy_id_field(fishnet_shp):
+    # 如果已经有 xy_id 字段，则跳过
+    fields = [f.name for f in arcpy.ListFields(fishnet_shp)]
+    if "xy_id" in fields:
+        print("字段 xy_id 已存在，跳过创建。")
+        return
+
+    # 新增字段
+    arcpy.management.AddField(fishnet_shp, "xy_id", "TEXT", field_length=50)
+
+    # 用中心点生成 xy_id
+    with arcpy.da.UpdateCursor(fishnet_shp, ["SHAPE@XY", "xy_id"]) as cursor:
+        for row in cursor:
+            x, y = row[0]          # row[0] 是 (x, y) 元组
+            lon_dir = "W" if x < 0 else "E"
+            lat_dir = "S" if y < 0 else "N"
+            xy_id   = f"{lon_dir}{abs(x):.5f}{lat_dir}{abs(y):.5f}"
+            row[1]  = xy_id
+            cursor.updateRow(row)
+
+
 def build_pixel_fishnet(sample_raster, out_shp):
     if os.path.exists(out_shp):
         return  # 已有则跳过
@@ -48,9 +69,18 @@ def build_pixel_fishnet(sample_raster, out_shp):
         geometry_type     = "POLYGON"
     )
 
-    # 3) 添加唯一编号字段 pix_id = OID
+    # 添加 index 字段
     arcpy.management.AddField(out_shp, "index", "LONG")
     arcpy.management.CalculateField(out_shp, "index", "!FID!", "PYTHON3")
+
+    # 立刻写入 xy_id，避免第二次获取 schema 锁
+    arcpy.management.AddField(out_shp, "xy_id", "TEXT", field_length=50)
+    with arcpy.da.UpdateCursor(out_shp, ["SHAPE@XY", "xy_id"]) as cur:
+        for row in cur:
+            x, y = row[0]
+            xy_id = f"{'W' if x<0 else 'E'}{abs(x):.5f}{'S' if y<0 else 'N'}{abs(y):.5f}"
+            row[1] = xy_id
+            cur.updateRow(row)
 
 # === 4. 单文件处理函数 ===
 def process_zonal(file_path):
@@ -66,7 +96,7 @@ def process_zonal(file_path):
     try:
         arcpy.sa.ZonalStatisticsAsTable(
             in_zone_data   = fishnet_shp,
-            zone_field     = 'index',
+            zone_field     = 'xy_id',
             in_value_raster= file_path,
             out_table      = output_table,
             ignore_nodata  = "DATA",
@@ -89,6 +119,8 @@ def main():
     if not sample_ras:
         raise RuntimeError("输入文件夹中未找到 *_clip.tif 文件。")
     build_pixel_fishnet(sample_ras, fishnet_shp)
+
+
 
     # 5-2 并行跑所有影像
     tif_files = [os.path.join(input_folder, f) for f in os.listdir(input_folder) if f.endswith("_clip.tif")]

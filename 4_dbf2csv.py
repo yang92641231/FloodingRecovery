@@ -3,8 +3,8 @@ import pandas as pd
 import os
 
 # 设置输出表格所在目录
-input_folder = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\h09v06_Florida\dbf\2017"
-output_csv = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\h09v06_Florida\dbf\2017\summary_wide.csv"
+input_folder = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\h09v06_Florida\dbf\2017xy"
+output_csv = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\h09v06_Florida\dbf\2017xy\summary_wide.csv"
 
 # 获取所有 .dbf 文件
 dbf_files = [f for f in os.listdir(input_folder) if f.endswith(".dbf")]
@@ -38,9 +38,26 @@ merged_df['date'] = pd.to_datetime(merged_df['year'] + merged_df['day_of_year'].
 merged_df = merged_df.drop(columns=['year', 'day_of_year'])
 
 # 转为宽格式
-merged_df_wide = merged_df.pivot(index='index', columns='date', values='MEAN')
-merged_df_wide = merged_df_wide.reset_index().rename(columns={'index': 'grid_id'})
+merged_df_wide = merged_df.pivot(index='xy_id', columns='date', values='MEAN')
+merged_df_wide = merged_df_wide.reset_index().rename(columns={'index': 'xy_id'})
 
 # 保存为 CSV
 merged_df_wide.to_csv(output_csv, index=False, encoding="utf-8-sig")
 print(f"\n全部完成，已导出：{output_csv}")
+
+# 删去dbf文件
+
+suffixes = (".dbf", ".cpg", ".dbf.xml") 
+
+for dbf in dbf_files:                    
+    stem = os.path.splitext(dbf)[0]
+    for suf in suffixes:
+        filepath = os.path.join(input_folder, stem + suf)
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+                print(f"已删除：{filepath}")
+            except Exception as e:
+                print(f"无法删除 {filepath}：{e}")
+
+print("\n清理完毕。")
