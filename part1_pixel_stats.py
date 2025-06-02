@@ -1,11 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-pixel_stats.py
------------------------------------------
-生成像素级 fishnet (shp)  &  批量 ZonalStatisticsAsTable
-可在主程序按需调用：
-    from pixel_stats import build_shp_grid, run_zonal_statistics
-"""
 import os
 import re
 from pathlib import Path
@@ -19,14 +12,14 @@ import arcpy
 
 # ------------------------- 通用工具 ------------------------- #
 def sanitize_name(raw_name: str) -> str:
-    """把 'VNP46A2.A2019025....tif' 变成 'd2019025.dbf' 等简洁名字"""
+    # 简化文件名
     m = re.search(r"\.A(\d{7})\.", raw_name)
     date7 = m.group(1) if m else re.sub(r'[^0-9]', '', raw_name)[:7].ljust(7, '_')
     return f"d{date7}.dbf"
 
 
 def _add_xy_id_field(fishnet_shp: str) -> None:
-    """给 fishnet 添加 xy_id = W/E + lon + N/S + lat"""
+    # 给 fishnet 添加 xy_id = W/E + lon + N/S + lat
     fields = [f.name for f in arcpy.ListFields(fishnet_shp)]
     if "xy_id" in fields:
         return
@@ -60,12 +53,7 @@ def build_shp_grid(
     zone_field: str = "index",
     overwrite: bool = False
 ) -> str:
-    """
-    根据参考栅格生成像素级鱼网 (polygon shp)，并写入:
-        * index (LONG) = FID
-        * xy_id (TEXT) = 'W120.12345N35.00000'
-    返回生成的 shp 路径
-    """
+
     out_shp = str(out_shp)
     if os.path.exists(out_shp) and not overwrite:
         print(f"fishnet 已存在：{out_shp}")
@@ -110,7 +98,6 @@ def _zonal_one(
     fishnet_shp: str,
     output_folder: str
 ) -> str:
-    """子进程：单栅格 → ZonalStatisticsAsTable"""
     arcpy.CheckOutExtension("Spatial")
     fname = os.path.basename(tif_path)
     table_name = sanitize_name(fname.replace("_clip_filtered.tif", ""))
@@ -140,10 +127,7 @@ def run_zonal_statistics(
     *,
     workers: int = 4
 ) -> None:
-    """
-    对 raster_folder 中所有 *_clip_filtered.tif 运行 ZonalStatisticsAsTable，
-    输出 DBF 至 output_folder
-    """
+
     if arcpy.CheckExtension("Spatial") != "Available":
         raise RuntimeError("Spatial Analyst 扩展不可用")
     arcpy.CheckOutExtension("Spatial")
@@ -172,14 +156,7 @@ def merge_dbf_tables(
     *,
     delete_dbf: bool = True
 ) -> None:
-    """
-    将 dbf_folder 内所有 .dbf 合并为宽格式 CSV：
-        1) 读取每个 DBF → DataFrame
-        2) 解析文件名中的日期 (A<YYYY><DOY>)
-        3) pivot:  index=xy_id, columns=date, values=MEAN
-        4) 保存 output_csv
-        5) 可选删除 *.dbf / *.cpg / *.dbf.xml
-    """
+
     dbf_files = [f for f in os.listdir(dbf_folder) if f.lower().endswith(".dbf")]
     if not dbf_files:
         print("⚠ 未找到 .dbf 文件，跳过合并")

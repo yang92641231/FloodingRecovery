@@ -2,18 +2,18 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-"""
-生成每日灾难矩阵表，每行是县，每列是一个日期，灾难发生标记为1。
 
-参数:
-- input_csv: 输入的CSV文件路径
-- output_csv: 输出的CSV文件路径
-- start_date: 起始日期（字符串格式）
-- end_date: 结束日期（字符串格式）
-- county_col: 县名列名
-- code_col: 县代码列名
-- date_col: 灾难日期列名
-"""
+# 生成每日灾难矩阵表，每行是县，每列是一个日期，灾难发生标记为1。
+
+# 参数:
+# - input_csv: 输入的CSV文件路径
+# - output_csv: 输出的CSV文件路径
+# - start_date: 起始日期（字符串格式）
+# - end_date: 结束日期（字符串格式）
+# - county_col: 县名列名
+# - code_col: 县代码列名
+# - date_col: 灾难日期列名
+
 
 
 def generate_disaster_matrix(input_csv, output_csv,

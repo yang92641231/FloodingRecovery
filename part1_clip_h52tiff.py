@@ -22,7 +22,7 @@ _tile_re = re.compile(r"h(\d{2})v(\d{2})", re.I)
 
 
 def _get_tile_hv(h5_path: Path, meta: dict) -> tuple[int, int]:
-    """优先从文件名解析 h/v，回退到元数据。"""
+    # 优先从文件名解析 h/v，回退到元数据
     m = _tile_re.search(h5_path.name)
     if m:
         return int(m.group(1)), int(m.group(2))
