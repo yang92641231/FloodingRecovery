@@ -77,9 +77,9 @@ def process_one_tile(tid: str, county_shp: str, sub_dir: Path):
     注意不要再扫描父目录；直接用 sub_dir / "clip"
     """
     clip_dir = sub_dir / "clip"
-    gdb_dir  = sub_dir / "gdb"
+    dbf_dir  = sub_dir / "dbf"
     clip_dir.mkdir(parents=True, exist_ok=True)
-    gdb_dir.mkdir(exist_ok=True)
+    dbf_dir.mkdir(exist_ok=True)
 
     # ——▶ 3.1： *单进程* 跑整目录
     viirs_hdf_to_clipped_tif(
@@ -290,15 +290,15 @@ def process_one_county(code: str) -> None:
         tile_fishnets = []
         tile_csvs     = []
 
-        tile_list = tile_ids          # 原来是 []
+        tile_list = tile_ids         
 
         for tid in tile_list:
             logging.info(f"[{code}] >>> Tile {tid} start")
             sub_dir  = tmp_dir / f"tile_{tid}"
             clip_dir = sub_dir / "clip"
-            gdb_dir  = sub_dir / "gdb"
+            dbf_dir  = sub_dir / "dbf"
             clip_dir.mkdir(parents=True, exist_ok=True)
-            gdb_dir.mkdir(exist_ok=True)
+            dbf_dir.mkdir(exist_ok=True)
 
             # ---------- 3.1 并行裁剪 ----------
             # ① 列出所有 hdf 文件（按你的 RAW_VIIRS_ROOT 规则来）
