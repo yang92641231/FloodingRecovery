@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import List, Optional
 from osgeo import gdal, ogr
 import numpy as np
+gdal.SetConfigOption("GDAL_NUM_THREADS", "ALL_CPUS")
+gdal.SetConfigOption("GDAL_CACHEMAX", "4096")   
 gdal.PushErrorHandler("CPLQuietErrorHandler")
 
 # ------------------------------------------------------------------
@@ -56,9 +58,13 @@ def viirs_hdf_to_clipped_tif(
             continue
 
         out_tif = out_dir / f"{h5_path.stem}_clip_filtered.tif"
-        if out_tif.exists() and not overwrite:
-            print(f"• 跳过已存在：{out_tif.name}")
-            continue
+        if out_tif.exists():
+            if overwrite:                          # 要强制覆盖
+                gdal.Unlink(str(out_tif))          
+                print(f"• 发现旧文件，已删除：{out_tif.name}")
+            else:                                  # 不覆盖，跳过
+                print(f"• 跳过已存在：{out_tif.name}")
+                continue
 
         print(f"▶ 处理 {h5_path.name}")
 

@@ -2,8 +2,9 @@
 import os
 import shutil
 import logging
+import multiprocessing as mp
 from pathlib import Path
-from multiprocessing import freeze_support
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import arcpy
 import pandas as pd
@@ -11,9 +12,9 @@ import pandas as pd
 
 
 # --- 常量路径 ---
-ROOT            = r"E:\National University of Singapore\Yang Yang - flooding\Process Data"
-RAW_VIIRS_ROOT  = r"E:\National University of Singapore\Yang Yang - flooding\Raw Data\California\2018"
-COUNTY_CSV      = r"E:\National University of Singapore\Yang Yang - flooding\Process Data\county_disaster_daily_matrix_test.csv"
+ROOT            = r"E:\ProcessData_CA"
+RAW_VIIRS_ROOT  = r"F:\数据\Flood_lighting\California"
+COUNTY_CSV      = r"E:\OneDrive - National University of Singapore\研二下\Flooding\ca_counties.csv"
 COUNTY_SHP      = r"E:\National University of Singapore\Yang Yang - flooding\Raw Data\SHP\selectedCounty.shp"
 TILE_SHP        = r"E:\National University of Singapore\Yang Yang - flooding\Raw Data\SHP\BlackMarbleTiles.shp"
 
@@ -52,7 +53,61 @@ def mark_done(code: str) -> None:
     with open(PROGRESS_FILE, "a", encoding="utf-8") as f:
         f.write(f"{code}\n")
 
+def _convert_one_hdf(h5_path: Path, clip_dir: Path, county_shp: str, tid: str):
+    """
+    单个 HDF → GeoTIFF，供多进程调用
+    """
+    try:
+        viirs_hdf_to_clipped_tif(
+            input_folder  = h5_path.parent,   # 只扫这一张
+            output_folder = str(clip_dir),
+            cutline_shp   = county_shp,
+            tile_filter   = tid,
+            dst_nodata    = -9999,
+            overwrite     = False
+        )
+        return h5_path.name
+    except Exception as e:
+        return f"ERR:{h5_path.name}:{e}"
+    
 
+def process_one_tile(tid: str, county_shp: str, sub_dir: Path):
+    """
+    把原来 for tid in tile_list: 里的 3.1~3.3 全放进来
+    注意不要再扫描父目录；直接用 sub_dir / "clip"
+    """
+    clip_dir = sub_dir / "clip"
+    gdb_dir  = sub_dir / "gdb"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    gdb_dir.mkdir(exist_ok=True)
+
+    # ——▶ 3.1： *单进程* 跑整目录
+    viirs_hdf_to_clipped_tif(
+        input_folder  = RAW_VIIRS_ROOT,  # 让它自己扫所有 HDF
+        output_folder = str(clip_dir),
+        cutline_shp   = county_shp,
+        tile_filter   = tid,             # 只过滤该 tile
+        dst_nodata    = -9999,
+        overwrite     = False
+    )
+
+    # ——▶ 3.2 之后保持原来的串行逻辑
+    sample_raster = find_sample_raster(str(clip_dir))
+    if sample_raster is None:
+        logging.warning(f"[{tid}] no raster – skipped")
+        return None      # 返回值让县级函数判断是否成功
+
+    fishnet_tile = sub_dir / f"fishnet_{tid}.shp"
+    build_shp_grid(sample_raster, str(fishnet_tile))
+
+    dbf_dir = sub_dir / "dbf"
+    dbf_dir.mkdir(exist_ok=True)
+    run_zonal_statistics(str(clip_dir), str(fishnet_tile), str(dbf_dir))
+
+    csv_tile = sub_dir / f"csv_{tid}.csv"
+    merge_dbf_tables(str(dbf_dir), str(csv_tile), delete_dbf=True)
+
+    return fishnet_tile, csv_tile
 
 # --- 单县完整流程 ---
 def export_county_polygon(code: str, out_shp: str) -> bool:
@@ -235,42 +290,68 @@ def process_one_county(code: str) -> None:
         tile_fishnets = []
         tile_csvs     = []
 
-        for tid in tile_ids:
+        tile_list = tile_ids          # 原来是 []
+
+        for tid in tile_list:
             logging.info(f"[{code}] >>> Tile {tid} start")
             sub_dir  = tmp_dir / f"tile_{tid}"
             clip_dir = sub_dir / "clip"
-            dbf_dir  = sub_dir / "dbf"
+            gdb_dir  = sub_dir / "gdb"
             clip_dir.mkdir(parents=True, exist_ok=True)
-            dbf_dir.mkdir(exist_ok=True)
+            gdb_dir.mkdir(exist_ok=True)
 
-            # 3.1 裁剪 HDF → GeoTIFF
-            viirs_hdf_to_clipped_tif(
-                input_folder  = RAW_VIIRS_ROOT,
-                output_folder = str(clip_dir),
-                cutline_shp   = str(county_shp),
-                tile_filter   = tid,
-                dst_nodata    = -9999,
-                overwrite     = False
-            )
+            # ---------- 3.1 并行裁剪 ----------
+            # ① 列出所有 hdf 文件（按你的 RAW_VIIRS_ROOT 规则来）
+            h5_paths = sorted(Path(RAW_VIIRS_ROOT).rglob(f"*{tid}*.h*"))
 
+            # ② 已有 tif 就跳过
+            existing_tif = any((clip_dir / f"{p.stem}_clip_filtered.tif").exists()
+                               for p in h5_paths)
+            if existing_tif:
+                logging.info(f"[{tid}] 检测到已有 tif，跳过转换")
+            else:
+                logging.info(f"[{tid}] {len(h5_paths)} HDF 待转换（多进程…）")
+
+                with ProcessPoolExecutor(max_workers=4) as ex:
+                    futures = {}
+                    for tid in tile_ids:
+                        sub_dir = tmp_dir / f"tile_{tid}"
+                        fut = ex.submit(process_one_tile, tid, str(county_shp), sub_dir)
+                        futures[fut] = tid
+
+                    for fut in as_completed(futures):
+                        tid = futures[fut]
+                        try:
+                            res = fut.result()
+                            if res is None:
+                                logging.warning(f"[{code}] Tile {tid} skipped")
+                                continue
+                            fishnet_tile, csv_tile = res
+                            tile_fishnets.append(str(fishnet_tile))
+                            tile_csvs.append(str(csv_tile))
+                        except Exception as e:
+                            logging.exception(f"[{code}] Tile {tid} failed: {e}")
+
+            # ---------- 3.2 以后维持串行 ----------
             sample_raster = find_sample_raster(str(clip_dir))
             if sample_raster is None:
                 logging.warning(f"[{code}] Tile {tid} produced no raster – skipped")
                 continue
 
-            # 生成 tile 专属 fishnet
             fishnet_tile = sub_dir / f"fishnet_{tid}.shp"
             build_shp_grid(sample_raster, str(fishnet_tile))
 
-            # Zonal 统计
+            dbf_dir = sub_dir / "dbf"         # 别忘了先定义
+            dbf_dir.mkdir(exist_ok=True)
+
             run_zonal_statistics(str(clip_dir), str(fishnet_tile), str(dbf_dir))
 
-            # 合并 DBF 产出 CSV（并删除原始 DBF）
             csv_tile = sub_dir / f"csv_{tid}.csv"
             merge_dbf_tables(str(dbf_dir), str(csv_tile), delete_dbf=True)
 
             tile_fishnets.append(str(fishnet_tile))
             tile_csvs.append(str(csv_tile))
+
 
         if not tile_fishnets:
             logging.warning(f"[{code}] No tile succeeded – skipped")
@@ -313,7 +394,7 @@ def process_one_county(code: str) -> None:
             logging.warning(f"[{code}] !! Failed to delete temp folder: {cleanup_err}")
 
 def main() -> None:
-    freeze_support()
+    mp.freeze_support()
 
 
     all_ctfips = set()

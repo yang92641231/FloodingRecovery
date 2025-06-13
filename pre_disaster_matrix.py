@@ -46,3 +46,15 @@ def generate_disaster_matrix(input_csv, output_csv,
     # 排序列并保存
     result_df = result_df[[county_col, code_col] + sorted(all_dates)]
     result_df.to_csv(output_csv, index=False)
+
+
+if __name__ == "__main__":
+    generate_disaster_matrix(
+        input_csv=r"D:\OneDrive - National University of Singapore\研二下\Flooding\reg_disaster.csv",
+        output_csv=r"D:\OneDrive - National University of Singapore\研二下\Flooding\disaster_matrix.csv",
+        start_date='2012-01-01',
+        end_date='2024-12-31',
+        county_col='County',
+        code_col='countyCode',
+        date_col='Incident Begin Date'
+    )
