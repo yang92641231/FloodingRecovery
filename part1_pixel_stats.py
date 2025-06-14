@@ -6,6 +6,9 @@ import pandas as pd
 from typing import List, Tuple, Optional
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import freeze_support
+import pyarrow as pa
+import pyarrow.parquet as pq
+import gc
 
 import arcpy
 
@@ -32,6 +35,48 @@ def _add_xy_id_field(fishnet_shp: str) -> None:
             row[1] = xy_id
             cur.updateRow(row)
 
+
+def _flush_chunk(chunk: list[pd.DataFrame], accumulated: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """把当前 chunk DataFrame 列表 concat → 解析日期 → pivot → 与累计宽表 outer merge"""
+    merged_long = pd.concat(chunk, ignore_index=True)
+
+    # 解析日期列
+    merged_long["year"]        = merged_long["filename"].str[1:5]
+    merged_long["day_of_year"] = merged_long["filename"].str[5:8].astype(int)
+    merged_long["date"]        = pd.to_datetime(
+        merged_long["year"] + merged_long["day_of_year"].astype(str),
+        format="%Y%j"
+    )
+    merged_long.drop(columns=["year", "day_of_year"], inplace=True)
+
+    # 宽表
+    wide_part = (
+        merged_long
+        .pivot(index="xy_id", columns="date", values="MEAN")
+        .reset_index()
+    )
+
+    # 第一次 flush
+    if accumulated is None:
+        return wide_part
+
+    # 后续 flush：按 xy_id 外连接，把新出现的日期列 append 上
+    accumulated = accumulated.merge(wide_part, on="xy_id", how="outer", copy=False)
+    return accumulated
+
+def _cleanup_dbf(dbf_folder: str, dbf_files: list[str]) -> None:
+    suffixes = (".dbf", ".cpg", ".dbf.xml")
+    for dbf in dbf_files:
+        stem = os.path.splitext(dbf)[0]
+        for suf in suffixes:
+            p = os.path.join(dbf_folder, stem + suf)
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                    print(f"已删除：{p}")
+                except Exception as e:
+                    print(f"无法删除 {p} → {e}")
+    print("✓ DBF 清理完毕")
 
 def find_sample_raster(raster_folder_path):
         # 获取文件夹下的所有文件，并筛选出以常见栅格格式结尾的文件，如 .tif
@@ -125,28 +170,42 @@ def run_zonal_statistics(
     fishnet_shp: str,
     output_folder: str,
     *,
-    workers: int = 4
+    workers: int = 4        # ← 默认仍然 4；在子进程里传 1 可禁用并行
 ) -> None:
 
+    # --- Spatial 扩展 ---
     if arcpy.CheckExtension("Spatial") != "Available":
         raise RuntimeError("Spatial Analyst 扩展不可用")
     arcpy.CheckOutExtension("Spatial")
 
     os.makedirs(output_folder, exist_ok=True)
-    tif_list = [str(Path(raster_folder) / f)
-                for f in os.listdir(raster_folder)
-                if f.endswith("_clip_filtered.tif")]
+    tif_list = [
+        str(Path(raster_folder) / f)
+        for f in os.listdir(raster_folder)
+        if f.endswith("_clip_filtered.tif")
+    ]
 
     if not tif_list:
         print("未找到 *_clip_filtered.tif")
         return
 
     print(f"开始 ZonalStatistics 共 {len(tif_list)} 幅")
-    with ProcessPoolExecutor(max_workers=workers) as exe:
-        for res in exe.map(_zonal_one, tif_list,
-                           [fishnet_shp]*len(tif_list),
-                           [output_folder]*len(tif_list)):
+
+    # ---------- 并行 or 串行 ----------
+    if workers and workers > 1 and len(tif_list) > 1:
+        with ProcessPoolExecutor(max_workers=workers) as exe:
+            for res in exe.map(
+                _zonal_one,
+                tif_list,
+                [fishnet_shp] * len(tif_list),
+                [output_folder] * len(tif_list)
+            ):
+                print(res)
+    else:
+        for tif in tif_list:
+            res = _zonal_one(tif, fishnet_shp, output_folder)
             print(res)
+
     print("全部 Zonal 处理完成")
 
 
@@ -154,7 +213,8 @@ def merge_dbf_tables(
     dbf_folder: str,
     output_csv: str,
     *,
-    delete_dbf: bool = True
+    chunk_size: int = 200,          # ← 每 N 个 .dbf 做一次 flush
+    delete_dbf: bool = False
 ) -> None:
 
     dbf_files = [f for f in os.listdir(dbf_folder) if f.lower().endswith(".dbf")]
@@ -162,52 +222,39 @@ def merge_dbf_tables(
         print("⚠ 未找到 .dbf 文件，跳过合并")
         return
 
-    merged_df = pd.DataFrame()
-    for dbf in dbf_files:
+    wide_df: Optional[pd.DataFrame] = None      # 累计的宽表
+    chunk: list[pd.DataFrame] = []              # 当前待处理的小批次
+
+    for idx, dbf in enumerate(dbf_files, 1):
         dbf_path = os.path.join(dbf_folder, dbf)
         try:
-            array = arcpy.da.TableToNumPyArray(dbf_path, "*")
-            df = pd.DataFrame(array)
-            df["filename"] = os.path.splitext(dbf)[0]     # 例：A2016153_h09v06
-            merged_df = pd.concat([merged_df, df], ignore_index=True)
-            print(f"已合并：{dbf}")
+            arr = arcpy.da.TableToNumPyArray(dbf_path, "*")
+            df  = pd.DataFrame(arr)
+            df["filename"] = os.path.splitext(dbf)[0]
+            chunk.append(df)
+            print(f"已读取 {idx}/{len(dbf_files)} → {dbf}")
         except Exception as e:
             print(f"跳过：{dbf} → {e}")
 
-    if merged_df.empty:
+        # 满一批就 flush
+        if len(chunk) == chunk_size:
+            wide_df = _flush_chunk(chunk, wide_df)    # ← 见下方私有函数
+            chunk.clear(); gc.collect()
+
+    # 处理最后不足一批的残留
+    if chunk:
+        wide_df = _flush_chunk(chunk, wide_df)
+        chunk.clear(); gc.collect()
+
+    if wide_df is None or wide_df.empty:
         print("⚠ 合并结果为空，终止")
         return
 
-    # 解析日期
-    merged_df["year"]         = merged_df["filename"].str[1:5]
-    merged_df["day_of_year"]  = merged_df["filename"].str[5:8].astype(int)
-    merged_df["date"]         = pd.to_datetime(
-        merged_df["year"] + merged_df["day_of_year"].astype(str),
-        format="%Y%j")
-    merged_df.drop(columns=["year", "day_of_year"], inplace=True)
-
-    # 宽格式 pivot
-    merged_wide = (
-        merged_df
-        .pivot(index="xy_id", columns="date", values="MEAN")
-        .reset_index()
-    )
-
+    # ---------- 导出 CSV ----------
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-    merged_wide.to_csv(output_csv, index=False, encoding="utf-8-sig")
+    wide_df.to_csv(output_csv, index=False, encoding="utf-8-sig")
     print(f"✓ 已导出 CSV：{output_csv}")
 
-    # 可选删除源 dbf+附属文件
+    # ---------- 可选删除源文件 ----------
     if delete_dbf:
-        suffixes = (".dbf", ".cpg", ".dbf.xml")
-        for dbf in dbf_files:
-            stem = os.path.splitext(dbf)[0]
-            for suf in suffixes:
-                path = os.path.join(dbf_folder, stem + suf)
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                        print(f"已删除：{path}")
-                    except Exception as e:
-                        print(f"无法删除 {path} → {e}")
-        print("✓ DBF 清理完毕")
+        _cleanup_dbf(dbf_folder, dbf_files)

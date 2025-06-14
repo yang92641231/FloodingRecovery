@@ -5,6 +5,10 @@ import logging
 import multiprocessing as mp
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import glob, re, shutil
+import numpy as np
+import pyarrow.dataset as ds
+
 
 import arcpy
 import pandas as pd
@@ -23,13 +27,15 @@ CSV_DIR         = os.path.join(ROOT, "lighting_csv")
 PROGRESS_FILE   = os.path.join(ROOT, "progress.txt")
 LOG_FILE        = os.path.join(ROOT, "process.log")
 
+os.makedirs(FISHNET_DIR, exist_ok=True)
+
 # --- 外部模块函数 ---
 from part1_clip_h52tiff import viirs_hdf_to_clipped_tif
 from part1_pixel_stats import (
     build_shp_grid,
     find_sample_raster,
     run_zonal_statistics,
-    merge_dbf_tables,
+    merge_dbf_tables
 )
 
 # --- 日志 ---
@@ -53,23 +59,8 @@ def mark_done(code: str) -> None:
     with open(PROGRESS_FILE, "a", encoding="utf-8") as f:
         f.write(f"{code}\n")
 
-def _convert_one_hdf(h5_path: Path, clip_dir: Path, county_shp: str, tid: str):
-    """
-    单个 HDF → GeoTIFF，供多进程调用
-    """
-    try:
-        viirs_hdf_to_clipped_tif(
-            input_folder  = h5_path.parent,   # 只扫这一张
-            output_folder = str(clip_dir),
-            cutline_shp   = county_shp,
-            tile_filter   = tid,
-            dst_nodata    = -9999,
-            overwrite     = False
-        )
-        return h5_path.name
-    except Exception as e:
-        return f"ERR:{h5_path.name}:{e}"
-    
+
+
 
 def process_one_tile(tid: str, county_shp: str, sub_dir: Path):
     """
@@ -105,9 +96,11 @@ def process_one_tile(tid: str, county_shp: str, sub_dir: Path):
     run_zonal_statistics(str(clip_dir), str(fishnet_tile), str(dbf_dir))
 
     csv_tile = sub_dir / f"csv_{tid}.csv"
-    merge_dbf_tables(str(dbf_dir), str(csv_tile), delete_dbf=True)
+    merge_dbf_tables(str(dbf_dir), str(csv_tile), delete_dbf=False)
 
     return fishnet_tile, csv_tile
+
+
 
 # --- 单县完整流程 ---
 def export_county_polygon(code: str, out_shp: str) -> bool:
@@ -273,6 +266,8 @@ def process_one_county(code: str) -> None:
     tmp_dir       = Path(ROOT, code)
     fishnet_final = Path(FISHNET_DIR, f"{code}.shp")
     csv_final     = Path(CSV_DIR,     f"{code}.csv")
+    
+    Success = False
 
     try:
         tmp_dir.mkdir(exist_ok=True)
@@ -347,7 +342,7 @@ def process_one_county(code: str) -> None:
             run_zonal_statistics(str(clip_dir), str(fishnet_tile), str(dbf_dir))
 
             csv_tile = sub_dir / f"csv_{tid}.csv"
-            merge_dbf_tables(str(dbf_dir), str(csv_tile), delete_dbf=True)
+            merge_dbf_tables(str(dbf_dir), str(csv_tile), delete_dbf=False)
 
             tile_fishnets.append(str(fishnet_tile))
             tile_csvs.append(str(csv_tile))
@@ -375,6 +370,7 @@ def process_one_county(code: str) -> None:
         final_df.to_csv(csv_final, index=False, encoding="utf-8-sig")
 
         logging.info(f"[{code}] Completed successfully with {len(tile_fishnets)} tiles")
+        Success = True
         mark_done(code)
 
     except Exception as e:
@@ -386,12 +382,16 @@ def process_one_county(code: str) -> None:
         except Exception:
             pass
 
-        try:
-            if tmp_dir.exists():
-                shutil.rmtree(tmp_dir)
-                logging.info(f"[{code}] Temp folder deleted.")
-        except Exception as cleanup_err:
-            logging.warning(f"[{code}] !! Failed to delete temp folder: {cleanup_err}")
+        if Success == True:
+            try:
+                if tmp_dir.exists():
+                    shutil.rmtree(tmp_dir)
+                    logging.info(f"[{code}] Temp folder deleted.")
+            except Exception as cleanup_err:
+                logging.warning(f"[{code}] !! Failed to delete temp folder: {cleanup_err}")
+
+        else: logging.warning(f"Keep [{code}] folder for debug!")
+            
 
 def main() -> None:
     mp.freeze_support()
